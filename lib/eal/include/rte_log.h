@@ -417,6 +417,16 @@ RTE_INIT(__##type)							    \
 	RTE_LOG_REGISTER_IMPL(type,					      \
 		 RTE_STR(RTE_LOG_DEFAULT_LOGTYPE) "." RTE_STR(suffix), level)
 
+#ifdef CVM_OPT
+#if 1
+#define CVM_OPT_LOG(fmt, ...)				\
+        RTE_LOG(ERR, EAL, "%s:%d " fmt,     \
+                __func__, __LINE__, ## __VA_ARGS__)
+#else
+#define CVM_OPT_LOG(fmt, ...) (void)(0)
+#endif
+#endif
+
 #ifdef __cplusplus
 }
 #endif

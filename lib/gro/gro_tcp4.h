@@ -35,13 +35,28 @@ struct tcp4_flow_key {
 	uint16_t dst_port;
 };
 
+struct net_hdr_info {
+	struct rte_ether_hdr *eth_hdr;
+	struct rte_ipv4_hdr *ipv4_hdr;
+	struct rte_tcp_hdr *tcp_hdr;
+    uint16_t tcp_hdr_len;
+	uint32_t sent_seq;
+	int32_t tcp_dl; /* tcp data len */
+	uint16_t ip_id, hdr_len, frag_off;
+	uint8_t is_atomic;
+};
+
 struct gro_tcp4_flow {
 	struct tcp4_flow_key key;
+    struct net_hdr_info info;
 	/*
 	 * The index of the first packet in the flow.
 	 * INVALID_ARRAY_INDEX indicates an empty flow.
 	 */
 	uint32_t start_index;
+    uint16_t flush;
+    uint16_t same_flow;
+    uint64_t start_time;
 };
 
 struct gro_tcp4_item {
@@ -147,6 +162,11 @@ int32_t gro_tcp4_reassemble(struct rte_mbuf *pkt,
 		struct gro_tcp4_tbl *tbl,
 		uint64_t start_time);
 
+int32_t dev_gro_receive(struct rte_mbuf *pkt, struct rte_mbuf **out,
+		struct gro_tcp4_tbl *tbl,
+		uint64_t start_time,
+        uint32_t start_idx);
+
 /**
  * This function flushes timeout packets in a TCP/IPv4 reassembly table,
  * and without updating checksums.
@@ -170,6 +190,16 @@ uint16_t gro_tcp4_tbl_timeout_flush(struct gro_tcp4_tbl *tbl,
 		struct rte_mbuf **out,
 		uint16_t nb_out);
 
+uint16_t gro_flush_flow(struct gro_tcp4_tbl *tbl,
+        uint32_t flow_idx,
+        uint32_t start_idx,
+		struct rte_mbuf **out);
+
+uint16_t gro_flush_oldest(struct gro_tcp4_tbl *tbl,
+        uint32_t start_idx,
+		struct rte_mbuf **out);
+
+
 /**
  * This function returns the number of the packets in a TCP/IPv4
  * reassembly table.
@@ -188,13 +218,23 @@ uint32_t gro_tcp4_tbl_pkt_count(void *tbl);
 static inline int
 is_same_tcp4_flow(struct tcp4_flow_key k1, struct tcp4_flow_key k2)
 {
-	return (rte_is_same_ether_addr(&k1.eth_saddr, &k2.eth_saddr) &&
-			rte_is_same_ether_addr(&k1.eth_daddr, &k2.eth_daddr) &&
-			(k1.ip_src_addr == k2.ip_src_addr) &&
-			(k1.ip_dst_addr == k2.ip_dst_addr) &&
-			(k1.recv_ack == k2.recv_ack) &&
+	return ((k1.recv_ack == k2.recv_ack) &&
 			(k1.src_port == k2.src_port) &&
 			(k1.dst_port == k2.dst_port));
+}
+
+static inline int
+is_same_inet_flow(struct tcp4_flow_key k1, struct tcp4_flow_key k2)
+{
+	return ((k1.ip_src_addr == k2.ip_src_addr) &&
+			(k1.ip_dst_addr == k2.ip_dst_addr));
+}
+
+static inline int
+is_same_mac_flow(struct tcp4_flow_key k1, struct tcp4_flow_key k2)
+{
+	return (rte_is_same_ether_addr(&k1.eth_saddr, &k2.eth_saddr) &&
+			rte_is_same_ether_addr(&k1.eth_daddr, &k2.eth_daddr));
 }
 
 /*
@@ -203,6 +243,7 @@ is_same_tcp4_flow(struct tcp4_flow_key k1, struct tcp4_flow_key k2)
  * original packet. Otherwise, pre-pend the new packet to
  * the original packet.
  */
+#define MERGE_WITH_PSH
 static inline int
 merge_two_tcp4_packets(struct gro_tcp4_item *item,
 		struct rte_mbuf *pkt,
@@ -212,7 +253,12 @@ merge_two_tcp4_packets(struct gro_tcp4_item *item,
 		uint16_t l2_offset)
 {
 	struct rte_mbuf *pkt_head, *pkt_tail, *lastseg;
-	uint16_t hdr_len, l2_len;
+#ifdef MERGE_WITH_PSH
+	struct rte_tcp_hdr *head_tcp_hdr, *tail_tcp_hdr;
+	uint16_t hdr_len, l2_len, l3_offset;
+#else
+    int16_t hdr_len, l2_len;
+#endif
 
 	if (cmp > 0) {
 		pkt_head = item->firstseg;
@@ -223,13 +269,31 @@ merge_two_tcp4_packets(struct gro_tcp4_item *item,
 	}
 
 	/* check if the IPv4 packet length is greater than the max value */
+#ifdef MERGE_WITH_PSH
+    l3_offset = l2_offset + pkt_head->l2_len + pkt_head->l3_len;
+    hdr_len = l3_offset + pkt_head->l4_len;
+#else
 	hdr_len = l2_offset + pkt_head->l2_len + pkt_head->l3_len +
 		pkt_head->l4_len;
+#endif
 	l2_len = l2_offset > 0 ? pkt_head->outer_l2_len : pkt_head->l2_len;
 	if (unlikely(pkt_head->pkt_len - l2_len + pkt_tail->pkt_len -
-				hdr_len > MAX_IPV4_PKT_LENGTH))
+                hdr_len > MAX_IPV4_PKT_LENGTH)) {
+        CVM_OPT_LOG(" ERROR. seq: %u", sent_seq);
 		return 0;
+    }
 
+#ifdef MERGE_WITH_PSH
+	/* merge push flag to pkt_head */
+	tail_tcp_hdr = rte_pktmbuf_mtod_offset(pkt_tail,
+				struct rte_tcp_hdr *, l3_offset);
+	if (tail_tcp_hdr->tcp_flags & RTE_TCP_PSH_FLAG) {
+		head_tcp_hdr = rte_pktmbuf_mtod_offset(pkt_head,
+					struct rte_tcp_hdr *, l3_offset);
+		head_tcp_hdr->tcp_flags |= RTE_TCP_PSH_FLAG;
+	}
+#endif
+    
 	/* remove the packet header for the tail packet */
 	rte_pktmbuf_adj(pkt_tail, hdr_len);
 
@@ -256,6 +320,11 @@ merge_two_tcp4_packets(struct gro_tcp4_item *item,
 	return 1;
 }
 
+
+#define SEQ_LOG(fmt, ...)				\
+        CVM_OPT_LOG("[MISMERGE] seq: %u len: %u cur seq: %u len: %u " fmt,     \
+                    item->sent_seq, len, sent_seq, tcp_dl, ## __VA_ARGS__)
+                /* __func__, __LINE__, ## __VA_ARGS__) */
 /*
  * Check if two TCP/IPv4 packets are neighbors.
  */
@@ -281,27 +350,58 @@ check_seq_option(struct gro_tcp4_item *item,
 
 	/* Check if TCP option fields equal */
 	len = RTE_MAX(tcp_hl, tcp_hl_orig) - sizeof(struct rte_tcp_hdr);
+#ifdef CVM_OPT
+	if ((tcp_hl != tcp_hl_orig) || ((len > 0) &&
+				(memcmp(tcph + 1, tcph_orig + 1,
+					len) != 0))) {
+        if (tcp_hl != tcp_hl_orig)
+            CVM_OPT_LOG("[MISMERGE] seq: %u len: %u cur seq: %u len: %u"
+                    "tcp_hl %u tcp_hl_orig %u\n",
+                    item->sent_seq, len, sent_seq, tcp_dl,
+                    tcp_hl, tcp_hl_orig);
+        else
+            SEQ_LOG("MISMERGE: option field mismatch\n");
+		return 0;
+    }
+#else
 	if ((tcp_hl != tcp_hl_orig) || ((len > 0) &&
 				(memcmp(tcph + 1, tcph_orig + 1,
 					len) != 0)))
 		return 0;
+#endif
 
 	/* Don't merge packets whose DF bits are different */
+#ifdef CVM_OPT
+	if (unlikely(item->is_atomic ^ is_atomic)) {
+        SEQ_LOG("MISMERGE: item->is_atomic %x is_atomic %x\n",
+                item->is_atomic, is_atomic);
+		return 0;
+    }
+#else
 	if (unlikely(item->is_atomic ^ is_atomic))
 		return 0;
+#endif
 
 	/* check if the two packets are neighbors */
 	len = pkt_orig->pkt_len - l2_offset - pkt_orig->l2_len -
 		pkt_orig->l3_len - tcp_hl_orig;
 	if ((sent_seq == item->sent_seq + len) && (is_atomic ||
-				(ip_id == item->ip_id + 1)))
+                (ip_id == item->ip_id + 1))) {
 		/* append the new packet */
 		return 1;
+    }
 	else if ((sent_seq + tcp_dl == item->sent_seq) && (is_atomic ||
-				(ip_id + item->nb_merged == item->ip_id)))
+                (ip_id + item->nb_merged == item->ip_id))) {
 		/* pre-pend the new packet */
 		return -1;
+    }
 
+#if 0
+#ifdef CVM_OPT
+    CVM_OPT_LOG("MISMERGE: on_list seq %u len %u curr seq %u len %u\n",
+            item->sent_seq, len, sent_seq, tcp_dl);
+#endif
+#endif
 	return 0;
 }
 #endif

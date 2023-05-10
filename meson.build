@@ -11,6 +11,8 @@ project('DPDK', 'C',
         meson_version: '>= 0.49.2'
 )
 
+add_global_arguments('-DCVM_OPT', language : 'c')
+
 # check for developer mode
 developer_mode = false
 if get_option('developer_mode').auto()

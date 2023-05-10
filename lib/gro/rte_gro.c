@@ -6,6 +6,9 @@
 #include <rte_mbuf.h>
 #include <rte_cycles.h>
 #include <rte_ethdev.h>
+#ifdef CVM_OPT
+#include <rte_log.h>
+#endif
 
 #include "rte_gro.h"
 #include "gro_tcp4.h"
@@ -322,6 +325,7 @@ rte_gro_reassemble(struct rte_mbuf **pkts,
 		uint16_t nb_pkts,
 		void *ctx)
 {
+    return dpdk_gro(pkts, nb_pkts, ctx);
 	struct rte_mbuf *unprocess_pkts[nb_pkts];
 	struct gro_ctx *gro_ctx = ctx;
 	void *tcp_tbl, *udp_tbl, *vxlan_tcp_tbl, *vxlan_udp_tbl;
@@ -372,7 +376,7 @@ rte_gro_reassemble(struct rte_mbuf **pkts,
 			if (gro_udp4_reassemble(pkts[i], udp_tbl,
 						current_time) < 0)
 				unprocess_pkts[unprocess_num++] = pkts[i];
-		} else
+        } else
 			unprocess_pkts[unprocess_num++] = pkts[i];
 	}
 	if (unprocess_num > 0) {
@@ -381,6 +385,82 @@ rte_gro_reassemble(struct rte_mbuf **pkts,
 	}
 
 	return unprocess_num;
+}
+
+#define	ARRAY_SIZE(a)	(sizeof (a) / sizeof ((a)[0]))
+
+uint16_t
+dpdk_gro(struct rte_mbuf **pkts,
+		uint16_t nb_pkts,
+		void *ctx)
+{
+	struct rte_mbuf *flush_pkts[1024];
+	struct gro_ctx *gro_ctx = ctx;
+	void *tcp_tbl, *udp_tbl, *vxlan_tcp_tbl, *vxlan_udp_tbl;
+	uint64_t current_time;
+	uint16_t i, unprocess_num = 0;
+	uint8_t do_tcp4_gro, do_vxlan_tcp_gro, do_udp4_gro, do_vxlan_udp_gro;
+    uint32_t start_idx = 0;
+
+	if (unlikely((gro_ctx->gro_types & (RTE_GRO_IPV4_VXLAN_TCP_IPV4 |
+					RTE_GRO_TCP_IPV4 |
+					RTE_GRO_IPV4_VXLAN_UDP_IPV4 |
+                    RTE_GRO_UDP_IPV4)) == 0)) {
+        CVM_OPT_LOG("ERROR");
+		return nb_pkts;
+    }
+
+	tcp_tbl = gro_ctx->tbls[RTE_GRO_TCP_IPV4_INDEX];
+	vxlan_tcp_tbl = gro_ctx->tbls[RTE_GRO_IPV4_VXLAN_TCP_IPV4_INDEX];
+	udp_tbl = gro_ctx->tbls[RTE_GRO_UDP_IPV4_INDEX];
+	vxlan_udp_tbl = gro_ctx->tbls[RTE_GRO_IPV4_VXLAN_UDP_IPV4_INDEX];
+
+	do_tcp4_gro = (gro_ctx->gro_types & RTE_GRO_TCP_IPV4) ==
+		RTE_GRO_TCP_IPV4;
+	do_vxlan_tcp_gro = (gro_ctx->gro_types & RTE_GRO_IPV4_VXLAN_TCP_IPV4) ==
+		RTE_GRO_IPV4_VXLAN_TCP_IPV4;
+	do_udp4_gro = (gro_ctx->gro_types & RTE_GRO_UDP_IPV4) ==
+		RTE_GRO_UDP_IPV4;
+	do_vxlan_udp_gro = (gro_ctx->gro_types & RTE_GRO_IPV4_VXLAN_UDP_IPV4) ==
+		RTE_GRO_IPV4_VXLAN_UDP_IPV4;
+
+	current_time = rte_rdtsc();
+
+	for (i = 0; i < nb_pkts; i++) {
+		if (IS_IPV4_VXLAN_TCP4_PKT(pkts[i]->packet_type) &&
+				do_vxlan_tcp_gro) {
+            CVM_OPT_LOG("ERROR"); 
+			if (gro_vxlan_tcp4_reassemble(pkts[i], vxlan_tcp_tbl,
+						current_time) < 0)
+				flush_pkts[unprocess_num++] = pkts[i];
+		} else if (IS_IPV4_VXLAN_UDP4_PKT(pkts[i]->packet_type) &&
+				do_vxlan_udp_gro) {
+            CVM_OPT_LOG("ERROR"); 
+			if (gro_vxlan_udp4_reassemble(pkts[i], vxlan_udp_tbl,
+						current_time) < 0)
+				flush_pkts[unprocess_num++] = pkts[i];
+		} else if (IS_IPV4_TCP_PKT(pkts[i]->packet_type) &&
+				do_tcp4_gro) {
+                start_idx = dev_gro_receive(pkts[i], 
+                        flush_pkts, tcp_tbl, current_time, start_idx);
+		} else if (IS_IPV4_UDP_PKT(pkts[i]->packet_type) &&
+				do_udp4_gro) {
+            CVM_OPT_LOG("ERROR"); 
+			if (gro_udp4_reassemble(pkts[i], udp_tbl,
+						current_time) < 0)
+				flush_pkts[unprocess_num++] = pkts[i];
+        } else {
+            CVM_OPT_LOG("direct flush idx: %d", i);
+			flush_pkts[start_idx++] = pkts[i];
+        }
+	}
+
+    if (start_idx > 32) {
+        CVM_OPT_LOG("ERROR. array capacity: %d start_idx: %u", 32, start_idx);
+    }
+	memcpy(pkts, flush_pkts, sizeof(struct rte_mbuf *) * start_idx);
+
+	return start_idx;
 }
 
 uint16_t

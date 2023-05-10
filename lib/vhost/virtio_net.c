@@ -1030,10 +1030,17 @@ mbuf_to_desc(struct virtio_net *dev, struct vhost_virtqueue *vq,
 		cpy_len = RTE_MIN(buf_avail, mbuf_avail);
 
 		if (is_async) {
+#ifdef CVM_OPT
+            CVM_OPT_LOG("is_async %d\n", is_async);
+#endif
 			if (async_mbuf_to_desc_seg(dev, vq, m, mbuf_offset,
 						buf_iova + buf_offset, cpy_len) < 0)
 				goto error;
 		} else {
+#ifdef CVM_OPT
+            //CVM_OPT_LOG("addr %lx iova %lx off %x len %u\n",
+            //        buf_addr, buf_iova, mbuf_offset, cpy_len);
+#endif
 			sync_mbuf_to_desc_seg(dev, vq, m, mbuf_offset,
 					buf_addr + buf_offset,
 					buf_iova + buf_offset, cpy_len);
@@ -1381,8 +1388,15 @@ virtio_dev_rx(struct virtio_net *dev, uint16_t queue_id,
 	if (count == 0)
 		goto out;
 
+#ifdef CVM_OPT
+	if (vq_is_packed(dev)) {
+		nb_tx = virtio_dev_rx_packed(dev, vq, pkts, count);
+        CVM_OPT_LOG("vq_is_packed %d\n", vq_is_packed(dev));
+    }
+#else
 	if (vq_is_packed(dev))
 		nb_tx = virtio_dev_rx_packed(dev, vq, pkts, count);
+#endif
 	else
 		nb_tx = virtio_dev_rx_split(dev, vq, pkts, count);
 

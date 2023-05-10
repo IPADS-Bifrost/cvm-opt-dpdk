@@ -140,6 +140,10 @@ uint16_t rte_gro_reassemble(struct rte_mbuf **pkts,
 		uint16_t nb_pkts,
 		void *ctx);
 
+uint16_t dpdk_gro(struct rte_mbuf **pkts,
+		uint16_t nb_pkts,
+		void *ctx);
+
 /**
  * @warning
  * @b EXPERIMENTAL: this API may change without prior notice

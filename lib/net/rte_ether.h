@@ -85,6 +85,7 @@ static inline int rte_is_same_ether_addr(const struct rte_ether_addr *ea1,
 	const uint16_t *w1 = (const uint16_t *)ea1;
 	const uint16_t *w2 = (const uint16_t *)ea2;
 
+    /* CVM_OPT_LOG(" [10] w1: %u-%u-%u w2: %u-%u-%u", w1[0], w1[1], w1[2], w2[0], w2[1], w2[2]); */
 	return ((w1[0] ^ w2[0]) | (w1[1] ^ w2[1]) | (w1[2] ^ w2[2])) == 0;
 }
 
