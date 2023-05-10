@@ -2618,7 +2618,8 @@ virtio_dev_tx_split(struct virtio_net *dev, struct vhost_virtqueue *vq,
 		vq->shadow_used_idx = i;
 	if (likely(vq->shadow_used_idx)) {
 		flush_shadow_used_ring_split(dev, vq);
-		vhost_vring_call_split(dev, vq);
+		/* vhost_vring_call_split(dev, vq); */
+		vhost_tx_vring_call_split(dev, vq);
 	}
 
 	return (i - dropped);

@@ -25,6 +25,7 @@
 #include "vdpa_driver.h"
 
 #include "rte_vhost_async.h"
+#include <rte_atomic.h>
 
 /* Used to indicate that the device is running on a data core */
 #define VIRTIO_DEV_RUNNING ((uint32_t)1 << 0)
@@ -791,6 +792,49 @@ vhost_vring_call_split(struct virtio_net *dev, struct vhost_virtqueue *vq)
 				dev->notify_ops->guest_notified(dev->vid);
 		}
 	} else {
+		/* Kick the guest if necessary. */
+		if (!(vq->avail->flags & VRING_AVAIL_F_NO_INTERRUPT)
+				&& (vq->callfd >= 0)) {
+			eventfd_write(vq->callfd, (eventfd_t)1);
+			if (dev->notify_ops->guest_notified)
+				dev->notify_ops->guest_notified(dev->vid);
+		}
+	}
+}
+
+static rte_atomic64_t notify_cnt;
+static __rte_always_inline void
+vhost_tx_vring_call_split(struct virtio_net *dev, struct vhost_virtqueue *vq)
+{
+	/* Flush used->idx update before we read avail->flags. */
+	rte_atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+	/* Don't kick guest if we don't reach index specified by guest. */
+	if (dev->features & (1ULL << VIRTIO_RING_F_EVENT_IDX)) {
+		uint16_t old = vq->signalled_used;
+		uint16_t new = vq->last_used_idx;
+		bool signalled_used_valid = vq->signalled_used_valid;
+
+		vq->signalled_used = new;
+		vq->signalled_used_valid = true;
+
+		VHOST_LOG_DATA(DEBUG, "%s: used_event_idx=%d, old=%d, new=%d\n",
+			__func__,
+			vhost_used_event(vq),
+			old, new);
+
+		if ((vhost_need_event(vhost_used_event(vq), new, old) &&
+					(vq->callfd >= 0)) ||
+				unlikely(!signalled_used_valid)) {
+            unsigned long cnt = rte_atomic64_add_return(&notify_cnt, 1);
+            if (cnt % 16 == 0) {
+			    eventfd_write(vq->callfd, (eventfd_t) 1);
+			    if (dev->notify_ops->guest_notified)
+			    	dev->notify_ops->guest_notified(dev->vid);
+            }
+		}
+	} else {
+        // CVM_OPT_LOG("ERROR.");
 		/* Kick the guest if necessary. */
 		if (!(vq->avail->flags & VRING_AVAIL_F_NO_INTERRUPT)
 				&& (vq->callfd >= 0)) {
